@@ -76,8 +76,12 @@ wire [31:0] spiRx;
 wire spiStart, spiRdy;
 reg [3:0] spiCtrl;
 
-reg [23:0] display;
-reg [23:0] fg, bg;
+reg [26:0] display_c;
+reg [23:0] display_m;
+wire video_mode;
+wire auto_flush;
+wire vsync_flush;
+
 wire [23:0] vram_base;
 wire vram_access;
 wire [31:0] vram_rdata;
@@ -88,14 +92,50 @@ wire [31:0] viddata;
 reg [7:0] gpout, gpoc;
 wire [7:0] gpin;
 
-wire [23:0] RGB;
 wire hsync, vsync, vde;
+wire vid1;
+wire [7:0] vid2;
+
+wire [23:0] RGB;
+wire vid_rd;
+wire [23:4] vid_raddr;
 
 wire clkfbout, pllclk0, pllclk1, pllclk2;
 wire pll_locked;
 wire clk;
 reg rst;
+
 wire [3:0] ram_be;
+
+reg [3:0] state, next_state;
+reg [5:0] burst_cnt, next_burst_cnt;
+reg [3:0] cache_addr, next_cache_addr;
+reg cache_en, next_cache_en;
+reg cache_we, next_cache_we;
+reg vid_en, next_vid_en;
+reg [5:0] vid_addr, next_vid_addr;
+reg vid_we, next_vid_we;
+reg [127:0] cache_wdata, next_cache_wdata;
+reg vid_busy, next_vid_busy;
+reg wr_busy, next_wr_busy;
+reg rd_busy, next_rd_busy;
+wire [127:0] cache_rdata;
+wire [23:8] waddr, raddr;
+reg mem_wr_sync;
+reg mem_rd_sync;
+reg vid_rd_sync;
+
+reg c3_p0_cmd_en, next_p0_cmd_en;
+reg [2:0] c3_p0_cmd_instr, next_p0_cmd_instr;
+reg [29:0] c3_p0_cmd_byte_addr, next_p0_cmd_byte_addr;
+reg [5:0] c3_p0_cmd_bl, next_p0_cmd_bl;
+reg c3_p0_wr_en, next_p0_wr_en;
+reg c3_p0_rd_en, next_p0_rd_en;
+
+wire [127:0] c3_p0_rd_data;
+wire [127:0] c3_p0_wr_data;
+wire c3_p0_rd_empty;
+wire c3_p0_wr_empty;
 
 PLL_BASE # (
   .CLKIN_PERIOD(20),     // 20ns     =  50 MHz
@@ -143,23 +183,26 @@ PS2 kbd(.clk(clk), .rst(rst), .done(doneKbd), .rdy(rdyKbd), .shift(),
 
 MousePM Ms(.clk(clk), .rst(rst), .msclk(msclk), .msdat(msdat), .out(dataMs));
 
-VID video(.pclk(pclk), .inv(swi[7]), .vidadr(vidadr),
-   .viddata(viddata), .vid(vid), .hsync(hsync), .vsync(vsync), .vde(vde));
+VID video(.reset(~pll_locked), .pclk(pclk), .inv(swi[7]),
+   .hsync(hsync), .vsync(vsync), .vde(vde), .RGB(RGB),
+   .vidadr(vidadr), .viddata(viddata), .display_c(display_c[23:0]),
+   .mcb_clk(mem_clk), .mcb_raddr(vid_raddr), .mcb_rd(vid_rd),
+   .buff_data(cache_wdata), .buff_addr(vid_addr), .buff_wr(vid_we),
+   .mcb_busy(vid_busy), .video_mode(video_mode));
 
 DVI dvi(.clkx1in(pclk), .clkx2in(pclkx2), .clkx10in(pllclk0), .pll_locked(pll_locked),
-   .reset(~rst), .red_in(RGB[23:16]), .green_in(RGB[15:8]), .blue_in(RGB[7:0]),
+   .reset(1'b0), .red_in(RGB[23:16]), .green_in(RGB[15:8]), .blue_in(RGB[7:0]),
    .hsync(hsync), .vsync(vsync), .vde(vde), .TMDS(TMDS), .TMDSB(TMDSB));
 
 VRAM vram(.clka(~clk), .adra(vram_base[17:2]), .bea(ram_be), .wea(wr & vram_access),
    .wda(outbus), .rda(vram_rdata), .clkb(pclk), .adrb(vidadr),
    .rdb(viddata));
 
-assign RGB = vid ? fg : bg;
 assign codebus = adr[23:12] == 12'hFFE ? romout : inbus0;
 assign iowadr = adr[5:2];
 assign ioenb = (adr[23:6] == 18'h3FFFF);
 assign mreq = (adr[23:18] != 6'h3F) & ~vram_access;
-assign vram_base = adr[23:0] - display;
+assign vram_base = adr[23:0] - display_m;
 assign vram_access = (vram_base[23:18] == 6'h0) & 
         ((vram_base[17] == 1'b0) | ((vram_base[16] == 1'b0) & (vram_base[15] == 1'b0)));
 
@@ -174,10 +217,8 @@ assign inbus = (~ioenb & ~vram_access) ? codebus : (~ioenb & vram_access ? vram_
     (iowadr == 7) ? {24'b0, dataKbd} :
     (iowadr == 8) ? {24'b0, gpin} :
     (iowadr == 9) ? {24'b0, gpoc} :
-    (iowadr == 13) ? {8'b0, bg} :
-    (iowadr == 14) ? {8'b0, fg} :
-    (iowadr == 15) ? {8'b0, display} :
-    0));
+    (iowadr == 14) ? {5'd0, display_c} :
+    (iowadr == 15) ? {8'b0, display_m} : 0));
 
 assign ram_be[0] = ~ben | (~adr[1] & ~adr[0]);
 assign ram_be[1] = ~ben | (~adr[1] & adr[0]);
@@ -205,6 +246,10 @@ assign LED2 = Lreg[1];
 assign LED3 = Lreg[2]; 
 assign LED4 = Lreg[3]; 
 assign LED5 = ~SS[0];
+assign video_mode = display_c[24] | swi[6];
+assign auto_flush = display_c[25];
+assign vsync_flush = display_c[26];
+assign flush = ~auto_flush & ((vsync_flush & vsync) | (wr & ioenb & (iowadr == 14) & outbus[31]));
 assign leds = Lreg;
 
 always @(posedge clk)
@@ -217,44 +262,20 @@ begin
   bitrate <= ~rst ? 0 : (wr & ioenb & (iowadr == 3)) ? outbus[0] : bitrate;
   gpout <= (wr & ioenb & (iowadr == 8)) ? outbus[7:0] : gpout;
   gpoc <= ~rst ? 0 : (wr & ioenb & (iowadr == 9)) ? outbus[7:0] : gpoc;
-  bg <= (wr & ioenb & (iowadr == 13)) ? outbus[23:0] : bg;
-  fg <= (wr & ioenb & (iowadr == 14)) ? outbus[23:0] : fg;
-  display <= (wr & ioenb & (iowadr == 15)) ? outbus[23:0] : display;
+  display_c <= (wr & ioenb & (iowadr == 14)) ? outbus[26:0] : display_c;
+  display_m <= (wr & ioenb & (iowadr == 15)) ? outbus[23:0] : display_m;
 end
 
 initial begin
-  display = 24'h0e7f00;
-  bg = 24'h0; // 
-  fg = 24'hffffff;
+  display_c = 25'h0f00000;
+  display_m = 24'h0e7f00;
 end
 
-reg [2:0] state, next_state;
-reg [5:0] burst_cnt, next_burst_cnt;
-reg [3:0] cache_addr, next_cache_addr;
-reg cache_en, next_cache_en;
-reg cache_we, next_cache_we;
-reg [127:0] cache_wdata, next_cache_wdata;
-reg wr_busy, next_wr_busy;
-reg rd_busy, next_rd_busy;
-wire [127:0] cache_rdata;
-wire [23:8] waddr, raddr;
-reg mem_wr_sync;
-reg mem_rd_sync;
-
-reg c3_p0_cmd_en, next_p0_cmd_en;
-reg [2:0] c3_p0_cmd_instr, next_p0_cmd_instr;
-reg [29:0] c3_p0_cmd_byte_addr, next_p0_cmd_byte_addr;
-reg c3_p0_wr_en, next_p0_wr_en;
-reg c3_p0_rd_en, next_p0_rd_en;
-
-wire [127:0] c3_p0_rd_data;
-wire [127:0] c3_p0_wr_data;
-wire c3_p0_rd_empty;
-wire c3_p0_wr_empty;
 
 cache_64k cache (
   .clk(clk),
-  .flush_req(vsync),
+  .auto_flush_en(auto_flush),
+  .flush(flush),
   .addr(adr[23:0]),
   .dout(inbus0), 
   .din(outbus), 
@@ -278,47 +299,64 @@ cache_64k cache (
 
 assign c3_p0_wr_data = cache_rdata;
 
-parameter [2:0]
-  IDLE = 3'h0,
-  WRITE1 = 3'h1,
-  WRITE2 = 3'h2,
-  WRITE3 = 3'h3,
-  WRITE4 = 3'h4,
-  READ1 = 3'h5,
-  READ2 = 3'h6,
-  READ3 = 3'h7;
+parameter [3:0]
+  IDLE = 4'd0,
+  VID1 = 4'd1,
+  VID2 = 4'd2,
+  VID3 = 4'd3,
+  WRITE1 = 4'd4,
+  WRITE2 = 4'd5,
+  WRITE3 = 4'd6,
+  WRITE4 = 4'd7,
+  READ1 = 4'd8,
+  READ2 = 4'd9,
+  READ3 = 4'd10;
 
 always @ (posedge mem_clk) begin
-  if (~c3_calib_done) begin
-    state = IDLE;
-    burst_cnt = 6'd0;
-    cache_addr = 4'd0;
-    cache_en = 1'b0;
-    cache_wdata = 128'd0;
-    cache_we = 1'b0;
-    c3_p0_cmd_en = 1'b0;
-    c3_p0_cmd_instr = 3'd0;
-    c3_p0_cmd_byte_addr = 30'd0;
-    c3_p0_wr_en = 1'b0;
-    c3_p0_rd_en = 1'b0;
+  if (~c3_calib_done & ~reset_mclk) begin
+    state <= IDLE;
+    burst_cnt <= 6'd0;
+    cache_addr <= 4'd0;
+    cache_en <= 1'b0;
+    cache_wdata <= 128'd0;
+    cache_we <= 1'b0;
+    vid_en <= 1'b0;
+    vid_addr <= 6'd0;
+    vid_we <= 1'b0;
+    c3_p0_cmd_en <= 1'b0;
+    c3_p0_cmd_instr <= 3'd0;
+    c3_p0_cmd_byte_addr <= 30'd0;
+    c3_p0_cmd_bl <= 6'd0;
+    c3_p0_wr_en <= 1'b0;
+    c3_p0_rd_en <= 1'b0;
+    vid_busy <= 1'b0;
     wr_busy <= 1'b0;
     rd_busy <= 1'b0;
+    mem_wr_sync <= 1'b0;
+    mem_rd_sync <= 1'b0;
+    vid_rd_sync <= 1'b0;
   end else begin
-    state = next_state;
-    burst_cnt = next_burst_cnt;
-    cache_addr = next_cache_addr;
-    cache_en = next_cache_en;
-    cache_wdata = next_cache_wdata;
-    cache_we = next_cache_we;
-    c3_p0_cmd_en = next_p0_cmd_en;
-    c3_p0_cmd_instr = next_p0_cmd_instr;
-    c3_p0_cmd_byte_addr = next_p0_cmd_byte_addr;
-    c3_p0_wr_en = next_p0_wr_en;
-    c3_p0_rd_en = next_p0_rd_en;
+    state <= next_state;
+    burst_cnt <= next_burst_cnt;
+    cache_addr <= next_cache_addr;
+    cache_en <= next_cache_en;
+    cache_wdata <= next_cache_wdata;
+    cache_we <= next_cache_we;
+    vid_en <= next_vid_en;
+    vid_addr <= next_vid_addr;
+    vid_we <= next_vid_we;
+    c3_p0_cmd_en <= next_p0_cmd_en;
+    c3_p0_cmd_instr <= next_p0_cmd_instr;
+    c3_p0_cmd_byte_addr <= next_p0_cmd_byte_addr;
+    c3_p0_cmd_bl <= next_p0_cmd_bl;
+    c3_p0_wr_en <= next_p0_wr_en;
+    c3_p0_rd_en <= next_p0_rd_en;
+    vid_busy <= next_vid_busy;
     wr_busy <= next_wr_busy;
     rd_busy <= next_rd_busy;
     mem_wr_sync <= mem_wr;
     mem_rd_sync <= mem_rd;
+    vid_rd_sync <= vid_rd;
   end
 end
 
@@ -329,18 +367,33 @@ always @* begin
   next_cache_en = 1'b0;
   next_cache_wdata = c3_p0_rd_data;
   next_cache_we = 1'b0;
+  next_vid_en = 1'b0;
+  next_vid_addr = vid_en ? vid_addr + 1'b1 : vid_addr;
+  next_vid_we = 1'b0;
   next_p0_cmd_en = 1'b0;
   next_p0_cmd_instr = c3_p0_cmd_instr;
   next_p0_cmd_byte_addr = c3_p0_cmd_byte_addr;
+  next_p0_cmd_bl = c3_p0_cmd_bl;
   next_p0_wr_en = 1'b0;
   next_p0_rd_en = 1'b0;
+  next_vid_busy = vid_busy;
   next_wr_busy = wr_busy;
   next_rd_busy = rd_busy;
   case(state)
     IDLE: begin
+      next_vid_busy = 1'b0;
       next_wr_busy = 1'b0;
       next_rd_busy = 1'b0;
-      if (mem_wr_sync & c3_p0_wr_empty) begin
+      if (vid_rd_sync) begin
+        next_state = VID1;
+        next_vid_busy = 1'b1;
+        next_vid_addr = 6'd0;
+        next_burst_cnt = 6'd0;
+        next_p0_cmd_instr = 3'b001;
+        next_p0_cmd_en = 1'b1; 
+        next_p0_cmd_byte_addr = {6'd0, vid_raddr, 4'd0};
+        next_p0_cmd_bl = 6'd63;
+      end else if (mem_wr_sync & c3_p0_wr_empty) begin
         next_state = WRITE1;
         next_wr_busy = 1'b1;
         next_cache_addr = 4'd0;
@@ -348,6 +401,7 @@ always @* begin
         next_burst_cnt = 6'd0;
         next_p0_cmd_instr = 3'b000;
         next_p0_cmd_byte_addr = {6'd0, waddr, 8'd0};
+        next_p0_cmd_bl = 6'd15;
       end else if (mem_rd_sync) begin
         next_state = READ1;
         next_rd_busy = 1'b1;
@@ -356,7 +410,30 @@ always @* begin
         next_p0_cmd_instr = 3'b001;
         next_p0_cmd_en = 1'b1; 
         next_p0_cmd_byte_addr = {6'd0, raddr, 8'd0};
+        next_p0_cmd_bl = 6'd15;
       end
+    end
+    VID1: begin
+      if(~c3_p0_rd_empty) begin
+        next_p0_rd_en = 1'b1;
+        next_state = VID2;
+      end
+    end
+    VID2: begin
+      next_p0_rd_en = 1'b1;
+      if (c3_p0_rd_en & ~c3_p0_rd_empty) begin
+        next_burst_cnt = burst_cnt + 1'b1;
+        next_vid_en = 1'b1;
+        next_vid_we = 1'b1;
+        if (burst_cnt == 6'd63) begin
+          next_p0_rd_en = 1'b0;
+          next_state = VID3;
+        end
+      end
+    end
+    VID3: begin
+      next_vid_busy = 1'b0;
+      next_state = IDLE;
     end
     WRITE1: begin
       next_p0_wr_en = 1'b1;
@@ -369,6 +446,7 @@ always @* begin
     end
     WRITE2: begin
       next_p0_cmd_en = 1'b1;
+      next_wr_busy = 1'b0;
       next_state = WRITE3;
     end
     WRITE3: begin
@@ -388,7 +466,7 @@ always @* begin
         next_cache_en = 1'b1;
         next_cache_we = 1'b1;
         if (burst_cnt == 6'd15) begin
-          next_p0_rd_en = 1'b1;
+          next_p0_rd_en = 1'b0;
           next_state = READ3;
         end
       end
@@ -401,7 +479,6 @@ end
 
 
 wire [15:0] c3_p0_wr_mask = 16'b0;
-wire [5:0] c3_p0_cmd_bl = 6'd15;
 wire c3_p0_cmd_clk = mem_clk;
 wire c3_p0_wr_clk = mem_clk;
 wire c3_p0_rd_clk = mem_clk;
@@ -412,7 +489,7 @@ lpddr lpddr(
   .c3_calib_done(c3_calib_done),
   .clk100m(mem_clk),
   .clk25m(clk),
-  .reset(reset),
+  .reset(reset_mclk),
   .clk50m(clk50m),
   .mcb3_dram_dq(mcb3_dram_dq),
   .mcb3_dram_a(mcb3_dram_a),

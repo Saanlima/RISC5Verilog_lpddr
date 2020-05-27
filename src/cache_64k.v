@@ -1,7 +1,7 @@
 //////////////////////////////////////////////////////////////////////////////////
 //
 // Filename: cache_64k.v
-// Description: 2-way, 256-set cache with 256 byte cache lines
+// Description: 2-way, 128-set cache with 256 byte cache lines
 // Version 1.1
 // Creation date: May 21, 2020
 //
@@ -39,9 +39,10 @@
 
  
 module cache_64k(
-    // cpu interface
     input clk,
-    input flush_req,
+    input auto_flush_en,
+    input flush,
+    // cpu interface
     input [23:0] addr,       // cpu address
     output [31:0] dout,      // read data to cpu
     input [31:0] din,        // write data from cpu
@@ -63,7 +64,6 @@ module cache_64k(
     input wr_busy            // memory controller busy write
   );
 
-  reg [1:0] STATE;
   reg [8:0] tag [0:255] = 
     {9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 
      9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 9'd0, 
@@ -83,17 +83,23 @@ module cache_64k(
      9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1, 9'd1} ;
   reg [255:0] dirty = 256'b0;
   reg [127:0] lru = 128'hffffffffffffffffffffffffffffffff;
+
   wire [6:0] index;
   wire [7:0] target;
   wire hit0, hit1, hit;
   wire st0;
   wire wr;
+  reg [1:0] STATE = 2'b00;
+  reg [9:0] flush_timer = 10'd0;
+  reg flush_sync = 1'b0;
+  reg flush_sync_d = 1'b0;
+  reg full_flush = 1'b0;
+  reg auto_flush = 1'b0;
+  reg flushing = 1'b0;
+  reg [7:0] flush_target = 8'd0;
   reg rd_busy_sync, wr_busy_sync;
-  reg flush_req_d, flush_req_d2;
-  reg do_flush, flush;
-  reg [7:0] flush_target;
-  
-  assign ce = st0 & (~mreq | hit) & ~flush & ~do_flush;
+
+  assign ce = st0 & (~mreq | (hit & ~full_flush & ~auto_flush));
   assign raddr = addr[23:8];
   assign index = addr[14:8];
   assign hit0 = (tag[{1'b0, index}] == addr[23:15]);
@@ -106,26 +112,28 @@ module cache_64k(
   always @(posedge clk) begin
     rd_busy_sync <= rd_busy;
     wr_busy_sync <= wr_busy;
-    flush_req_d <= flush_req;
-    flush_req_d2 <= flush_req_d;
-    do_flush <= flush_req_d & ~flush_req_d2;
+    flush_timer <= auto_flush_en ? flush_timer + 1'b1 : 10'd0;
+    flush_sync <= flush;
+    flush_sync_d <= flush_sync;
+    full_flush <= ~auto_flush_en & (full_flush | (flush_sync & ~flush_sync_d));
+    auto_flush <= auto_flush_en & (auto_flush | (flush_timer == 10'd1023));
     case(STATE)
       2'b00: begin
         mem_wr <= 1'b0;
         mem_rd <= 1'b0;
-        if (do_flush) begin
-          flush <= 1'b1;
-          flush_target <= 8'd0;
-        end else if (flush) begin
+        flushing <= 1'b0;
+        flush_target <= (~full_flush & ~auto_flush_en) ? 8'd0 : flush_target;
+        if (full_flush | auto_flush) begin
           waddr <= {tag[flush_target], flush_target[6:0]}; 
           if (dirty[flush_target]) begin
+            flushing <= 1'b1;
             mem_wr <= 1'b1;
             dirty[flush_target] <= 1'b0;
             STATE <= 2'b01;
           end else begin
+            auto_flush <= 1'b0;
+            full_flush <= full_flush & (flush_target != 8'd255);
             flush_target <= flush_target + 1'b1;
-            if (flush_target == 8'd255)
-              flush <= 1'b0;
           end
         end else if (mreq) begin
           if (hit0) begin // cache hit0
@@ -151,8 +159,8 @@ module cache_64k(
       2'b01: begin  // write cache to memory
         if (wr_busy_sync) begin
           mem_wr <= 1'b0;
-          mem_rd <= ~flush;
-          STATE <= flush ? 2'b11 : 2'b10;
+          mem_rd <= ~flushing;
+          STATE <= flushing ? 2'b11 : 2'b10;
         end
       end
       2'b10: begin // read cache from memory
@@ -163,10 +171,11 @@ module cache_64k(
       end
       2'b11: begin // wait for memory controller to finish
         if (~rd_busy_sync & ~wr_busy_sync) begin
-          if (flush) begin
+          if (flushing) begin
+            flushing <= 1'b0;
+            auto_flush <= 1'b0;
+            full_flush <= full_flush & (flush_target != 8'd255);
             flush_target <= flush_target + 1'b1;
-            if (flush_target == 8'd255)
-              flush <= 1'b0;
           end
           STATE <= 2'b00;
         end
@@ -177,15 +186,15 @@ module cache_64k(
   cache_mem mem
   (
     .clka(~clk),
-    .ena(mreq & hit & st0),
-    .wea({4{mreq & hit & st0 & wr & ~flush & ~do_flush}} & wmask),
+    .ena(mreq & hit & st0 & ~auto_flush & ~full_flush),
+    .wea({4{wr}} & wmask),
     .addra({hit1, addr[14:2]}),
     .dina(din),
     .douta(dout),
     .clkb(mem_clk),
     .enb(cache_wr | cache_rd),
     .web({16{cache_wr}}),
-    .addrb({(flush ? flush_target : target), cache_addr}),
+    .addrb({(flushing ? flush_target : target), cache_addr}),
     .dinb(mem_din),
     .doutb(mem_dout)
   );

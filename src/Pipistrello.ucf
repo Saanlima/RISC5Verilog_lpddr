@@ -6,10 +6,6 @@ NET "sys_clk" LOC = "H17";
 NET "sys_clk" TNM_NET = "sys_clk";
 TIMESPEC TS_sys_clk = PERIOD "sys_clk" 20 ns HIGH 50 %;
 
-NET "lpddr/memc3_infrastructure_inst/clk1_bufg_in" TNM_NET = "GRP_1";
-NET "lpddr/memc3_infrastructure_inst/clk0_bufg_in" TNM_NET = RAMS "GRP_2";
-TIMESPEC TS_TIG = FROM GRP_1 TO GRP_2 TIG;
-
 # Reset switch
 NET "SWITCH" LOC = "N14" | IOSTANDARD = LVCMOS33 | PULLDOWN ;
 
