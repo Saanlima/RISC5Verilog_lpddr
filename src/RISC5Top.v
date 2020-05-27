@@ -93,8 +93,6 @@ reg [7:0] gpout, gpoc;
 wire [7:0] gpin;
 
 wire hsync, vsync, vde;
-wire vid1;
-wire [7:0] vid2;
 
 wire [23:0] RGB;
 wire vid_rd;
@@ -113,7 +111,7 @@ reg [3:0] cache_addr, next_cache_addr;
 reg cache_en, next_cache_en;
 reg cache_we, next_cache_we;
 reg vid_en, next_vid_en;
-reg [5:0] vid_addr, next_vid_addr;
+reg [6:0] vid_addr, next_vid_addr;
 reg vid_we, next_vid_we;
 reg [127:0] cache_wdata, next_cache_wdata;
 reg vid_busy, next_vid_busy;
@@ -267,7 +265,7 @@ begin
 end
 
 initial begin
-  display_c = 25'h0f00000;
+  display_c = 27'h0e00000;
   display_m = 24'h0e7f00;
 end
 
@@ -304,13 +302,16 @@ parameter [3:0]
   VID1 = 4'd1,
   VID2 = 4'd2,
   VID3 = 4'd3,
-  WRITE1 = 4'd4,
-  WRITE2 = 4'd5,
-  WRITE3 = 4'd6,
-  WRITE4 = 4'd7,
-  READ1 = 4'd8,
-  READ2 = 4'd9,
-  READ3 = 4'd10;
+  VID4 = 4'd4,
+  VID5 = 4'd5,
+  VID6 = 4'd6,
+  WRITE1 = 4'd7,
+  WRITE2 = 4'd8,
+  WRITE3 = 4'd9,
+  WRITE4 = 4'd10,
+  READ1 = 4'd11,
+  READ2 = 4'd12,
+  READ3 = 4'd13;
 
 always @ (posedge mem_clk) begin
   if (~c3_calib_done & ~reset_mclk) begin
@@ -387,7 +388,7 @@ always @* begin
       if (vid_rd_sync) begin
         next_state = VID1;
         next_vid_busy = 1'b1;
-        next_vid_addr = 6'd0;
+        next_vid_addr = 7'd0;
         next_burst_cnt = 6'd0;
         next_p0_cmd_instr = 3'b001;
         next_p0_cmd_en = 1'b1; 
@@ -432,6 +433,32 @@ always @* begin
       end
     end
     VID3: begin
+      next_burst_cnt = 6'd0;
+      next_p0_cmd_instr = 3'b001;
+      next_p0_cmd_en = 1'b1; 
+      next_p0_cmd_byte_addr = c3_p0_cmd_byte_addr + 11'h400;
+      next_p0_cmd_bl = 6'd63;
+      next_state = VID4;
+    end
+    VID4: begin
+      if(~c3_p0_rd_empty) begin
+        next_p0_rd_en = 1'b1;
+        next_state = VID5;
+      end
+    end
+    VID5: begin
+      next_p0_rd_en = 1'b1;
+      if (c3_p0_rd_en & ~c3_p0_rd_empty) begin
+        next_burst_cnt = burst_cnt + 1'b1;
+        next_vid_en = 1'b1;
+        next_vid_we = 1'b1;
+        if (burst_cnt == 6'd63) begin
+          next_p0_rd_en = 1'b0;
+          next_state = VID6;
+        end
+      end
+    end
+    VID6: begin
       next_vid_busy = 1'b0;
       next_state = IDLE;
     end

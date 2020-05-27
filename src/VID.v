@@ -16,7 +16,7 @@ module VID(
     output reg [23:4] mcb_raddr,
     output reg mcb_rd,
     input [127:0] buff_data,
-    input [5:0] buff_addr,
+    input [6:0] buff_addr,
     input buff_wr,
     input mcb_busy,
     input video_mode
@@ -29,9 +29,9 @@ wire hend, vend, vblank, xfer_m, vid_m;
 reg [31:0] pixbuf_m;
 
 wire xfer_c;
-wire [7:0] vid_c;
+wire [15:0] vid_c;
 reg [127:0] pixbuf_c;
-wire [5:0] vidadr_c;
+wire [6:0] vidadr_c;
 reg [127:0] viddata_c;
 wire vreq;
 reg [9:0] vreq_addr;
@@ -48,15 +48,15 @@ assign xfer_m = (hcnt[4:0] == 6);  // data delay > hcnt cycle + req cycle
 assign vid_m = (pixbuf_m[0] ^ inv) & ~hblank & ~vblank;
 assign vidadr = {1'b0, ~vcnt, hcnt[9:5]} - 16'h2000;
 
-assign xfer_c = (hcnt[3:0] == 6);  // data delay > hcnt cycle + req cycle
-assign vid_c = pixbuf_c[7:0];
-assign vidadr_c = hcnt[9:4];
+assign xfer_c = (hcnt[2:0] == 6);  // data delay > hcnt cycle + req cycle
+assign vid_c = pixbuf_c[15:0];
+assign vidadr_c = hcnt[9:3];
 assign vreq = video_mode & (hcnt == 11'd1024) & ((vcnt < 10'd767) | (vcnt == 10'd805));
 
 assign RGB = video_mode ? 
-              {vid_c[7:5], vid_c[7:5], vid_c[7:6], 
-               vid_c[4:2], vid_c[4:2], vid_c[4:3], 
-               vid_c[1:0], vid_c[1:0], vid_c[1:0], vid_c[1:0]} :
+              {vid_c[15:11], vid_c[15:13], 
+               vid_c[10:5], vid_c[10:9],
+               vid_c[4:0], vid_c[4:2]} :
               (vid_m ? 24'hffffff : 24'h0);
               
 always @(posedge pclk) begin  // pixel clock domain
@@ -64,7 +64,7 @@ always @(posedge pclk) begin  // pixel clock domain
   vcnt <= hend ? (vend ? 0 : (vcnt+1)) : vcnt;
   hblank <= xfer_c ? hcnt[10] : hblank;
   pixbuf_m <= xfer_m ? viddata : {1'b0, pixbuf_m[31:1]};
-  pixbuf_c <= xfer_c ? viddata_c : {8'b0, pixbuf_c[127:8]};
+  pixbuf_c <= xfer_c ? viddata_c : {16'b0, pixbuf_c[127:16]};
 end
 
 always @(posedge pclk or posedge reset) begin
@@ -79,7 +79,7 @@ always @(posedge pclk or posedge reset) begin
       2'b00: begin
         mcb_rd <= 1'b0;
         vreq_addr <= (vcnt == 10'd805) ? 10'd0 : vcnt + 1'b1;
-        mcb_raddr <= display_c[23:4] + 16'hbfc0 - {vreq_addr, 6'd0};
+        mcb_raddr <= display_c[23:4] + 17'h17f80 - {vreq_addr, 7'd0};
         if(vreq) begin
           state <= 2'b01;
         end
@@ -105,7 +105,7 @@ always @(posedge pclk or posedge reset) begin
 end
 
 // scanline buffer
-reg [127:0] ram [63:0];
+reg [127:0] ram [127:0];
 
 // Port A - write from mcb
 always @(posedge mcb_clk) begin
